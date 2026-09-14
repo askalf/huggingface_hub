@@ -27,23 +27,4 @@ jobs:
           $v = if ("${{ matrix.long_paths }}" -eq "off") { 0 } else { 1 }
           Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value $v -Type DWord
       - name: Sweep open() across the limit
-        run: |
-          python -c @"
-          import os, tempfile, winreg
-          k = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r'SYSTEM\CurrentControlSet\Control\FileSystem')
-          print('LongPathsEnabled =', winreg.QueryValueEx(k, 'LongPathsEnabled')[0])
-          d = tempfile.mkdtemp()
-          first_fail = None
-          for total in range(250, 275):
-              n = total - len(d) - 1
-              p = os.path.join(d, 'x' * n)
-              try:
-                  open(p, 'wb').close()
-                  os.unlink(p)
-                  print(f'len={total} open OK')
-              except OSError as e:
-                  print(f'len={total} {type(e).__name__} winerror={getattr(e, \"winerror\", None)} {e.strerror}')
-                  if first_fail is None:
-                      first_fail = total
-          print('FIRST FAILING LENGTH:', first_fail)
-          "@
+        run: python probe_len.py
