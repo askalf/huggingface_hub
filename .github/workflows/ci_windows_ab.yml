@@ -12,6 +12,13 @@ jobs:
   windows-ab:
     runs-on: windows-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # GitHub's windows-latest image ships LongPathsEnabled=1, which is NOT the configuration the
+        # bug is reported against. Run both: long_paths=on shows the prefix contract, long_paths=off
+        # shows the actual WinError 206 the user hits.
+        long_paths: ["on", "off"]
     env:
       DISABLE_SYMLINKS_IN_WINDOWS_TESTS: 1
       UV_HTTP_TIMEOUT: 600
@@ -33,12 +40,24 @@ jobs:
           uv pip install "huggingface_hub[testing] @ ."
           uv pip uninstall hf_xet
 
-      - name: Preconditions -- long paths disabled, and which copy of the source is imported
+      - name: Set LongPathsEnabled for this matrix leg
+        run: |
+          $v = if ("${{ matrix.long_paths }}" -eq "off") { 0 } else { 1 }
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value $v -Type DWord
+
+      - name: Preconditions -- long-path state, and which copy of the source is imported
         working-directory: ./src
         run: |
           ..\.venv\Scripts\activate
           python -c "import winreg; k=winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r'SYSTEM\CurrentControlSet\Control\FileSystem'); print('LongPathsEnabled =', winreg.QueryValueEx(k, 'LongPathsEnabled')[0])"
           python -c "import huggingface_hub.file_download as m, inspect; print('imported from', m.__file__); print('fix present:', 'as_extended_path(incomplete_path.with_name' in inspect.getsource(m._download_to_tmp_and_move))"
+
+      - name: Bare open() of a 256-char unprefixed path (what the limit does on THIS leg)
+        working-directory: ./src
+        continue-on-error: true
+        run: |
+          ..\.venv\Scripts\activate
+          python -c "import os, tempfile; d = tempfile.mkdtemp(); n = 256 - len(d) - 1; p = os.path.join(d, 'x' * n); print('len', len(p)); open(p, 'wb').close(); print('opened OK')"
 
       - name: HEAD arm (with the fix)
         working-directory: ./src
