@@ -1949,7 +1949,13 @@ def _download_to_tmp_and_move(
     # process, a broken lock costs only duplicated bandwidth: each process downloads the full
     # file and atomically renames it to the final destination.
     # See https://github.com/huggingface/huggingface_hub/pull/4228.
-    tmp_path = incomplete_path.with_name(f"{incomplete_path.stem}.{uuid.uuid4().hex[:8]}.incomplete")
+    # The unique infix makes this name longer than `incomplete_path`, which callers already passed
+    # through `as_extended_path` (`_local_folder.LocalDownloadFilePaths.incomplete_path` for a
+    # `local_dir` download, the `blob_path` conversion above for a cache download). On Windows a name
+    # that fitted under the limit can cross it here, so convert again once the final name is known.
+    tmp_path = Path(
+        as_extended_path(incomplete_path.with_name(f"{incomplete_path.stem}.{uuid.uuid4().hex[:8]}.incomplete"))
+    )
     try:
         with tmp_path.open("wb") as f:
             logger.debug(f"Downloading '{filename}' to '{tmp_path}'")
