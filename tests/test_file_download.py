@@ -1591,15 +1591,16 @@ class TestDownloadToTmpAndMove:
         assert re.fullmatch(r".*blob\.[0-9a-f]{8}\.incomplete\.converted", opened), opened
 
     @pytest.mark.skipif(os.name != "nt", reason="Windows-specific test.")
-    @pytest.mark.parametrize("incomplete_path_len", [246, 255])
+    @pytest.mark.parametrize("incomplete_path_len", [247, 255])
     def test_download_to_deep_path(self, tmp_path: Path, incomplete_path_len: int):
         r"""A download whose temporary name crosses the Windows path limit must still run.
 
         Without long path support enabled, Windows caps file paths at 255 characters. The two
         parametrized lengths are the boundary this fix moves: at 255 the name passed in is itself at
-        the limit, and at 246 it is 9 below it -- the shortest length at which the added
-        '.<8 hex>.incomplete' infix still pushes the opened name past 255. Both were judged short
-        enough by the caller's conversion and then failed with WinError 206 on `open()`.
+        the limit, and at 247 it is 8 below it -- the shortest length at which the added
+        '.<8 hex>' infix still pushes the opened name past 255 (at 246 the opened name is exactly
+        255, i.e. still legal). Both were judged short enough by the caller's conversion and then
+        failed with WinError 206 on `open()`.
         """
         base = tmp_path / ("d" * max(1, incomplete_path_len - len(str(tmp_path / "blob.incomplete")) - 1))
         os.makedirs("\\\\?\\" + os.path.abspath(base), exist_ok=True)
