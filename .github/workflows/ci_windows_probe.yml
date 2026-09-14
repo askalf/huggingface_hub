@@ -1,0 +1,49 @@
+name: Windows path-limit probe (scratch)
+
+# Scratch-only: measures the length at which a plain unprefixed open() actually starts failing on a
+# Windows host, with long paths both enabled and disabled, so the test docstring can state the true
+# boundary instead of a derived one. Never merged; lives on ci_* branches only.
+on:
+  push:
+    branches:
+      - ci_*
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        long_paths: ["on", "off"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Set LongPathsEnabled for this matrix leg
+        run: |
+          $v = if ("${{ matrix.long_paths }}" -eq "off") { 0 } else { 1 }
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value $v -Type DWord
+      - name: Sweep open() across the limit
+        run: |
+          python -c @"
+          import os, tempfile, winreg
+          k = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r'SYSTEM\CurrentControlSet\Control\FileSystem')
+          print('LongPathsEnabled =', winreg.QueryValueEx(k, 'LongPathsEnabled')[0])
+          d = tempfile.mkdtemp()
+          first_fail = None
+          for total in range(250, 275):
+              n = total - len(d) - 1
+              p = os.path.join(d, 'x' * n)
+              try:
+                  open(p, 'wb').close()
+                  os.unlink(p)
+                  print(f'len={total} open OK')
+              except OSError as e:
+                  print(f'len={total} {type(e).__name__} winerror={getattr(e, \"winerror\", None)} {e.strerror}')
+                  if first_fail is None:
+                      first_fail = total
+          print('FIRST FAILING LENGTH:', first_fail)
+          "@
