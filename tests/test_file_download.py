@@ -1591,16 +1591,22 @@ class TestDownloadToTmpAndMove:
         assert re.fullmatch(r".*blob\.[0-9a-f]{8}\.incomplete\.converted", opened), opened
 
     @pytest.mark.skipif(os.name != "nt", reason="Windows-specific test.")
-    @pytest.mark.parametrize("incomplete_path_len", [247, 255])
+    @pytest.mark.parametrize("incomplete_path_len", [247, 251, 255])
     def test_download_to_deep_path(self, tmp_path: Path, incomplete_path_len: int):
         r"""A download whose temporary name crosses the Windows path limit must still run.
 
-        Without long path support enabled, Windows caps file paths at 255 characters. The two
-        parametrized lengths are the boundary this fix moves: at 255 the name passed in is itself at
-        the limit, and at 247 it is 8 below it -- the shortest length at which the added
-        '.<8 hex>' infix still pushes the opened name past 255 (at 246 the opened name is exactly
-        255, i.e. still legal). Both were judged short enough by the caller's conversion and then
-        failed with WinError 206 on `open()`.
+        The caller converted a name of `incomplete_path_len` characters, which `as_extended_path`
+        left alone because it fits its `max_length=255` budget; the name opened here is 9 characters
+        longer. The three lengths walk that window:
+
+        - 247 -> opened 256: past the 255-character budget, so the caller's conversion no longer
+          covers the name that is actually opened. `open()` itself still succeeds here (MAX_PATH is
+          259), so this length pins the *contract*: the opened name must be the converted one.
+          At 246 the opened name is exactly 255 and genuinely needs no conversion.
+        - 251 -> opened 260: the shortest length at which the download really fails without the fix.
+          Measured on a `windows-latest` runner with `LongPathsEnabled=0`: an unprefixed `open()`
+          succeeds through 259 characters and raises from 260 up.
+        - 255 -> opened 264: the caller's name is itself at the budget's edge.
         """
         base = tmp_path / ("d" * max(1, incomplete_path_len - len(str(tmp_path / "blob.incomplete")) - 1))
         os.makedirs("\\\\?\\" + os.path.abspath(base), exist_ok=True)
@@ -1609,7 +1615,7 @@ class TestDownloadToTmpAndMove:
 
         opened = self._download(incomplete_path, base / "blob")
 
-        assert len(opened) > 255  # the name really is past the limit
+        assert len(opened) > 255  # the name really is past the limit the caller checked against
         assert opened.startswith("\\\\?\\")
         assert (base / "blob").is_file()  # and the download completed into place
 
