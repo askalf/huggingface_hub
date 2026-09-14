@@ -13,6 +13,7 @@
 # limitations under the License.
 import io
 import os
+import re
 import shutil
 import stat
 import warnings
@@ -32,6 +33,7 @@ from huggingface_hub.file_download import (
     HfFileMetadata,
     _check_disk_space,
     _create_symlink,
+    _download_to_tmp_and_move,
     _get_pointer_path,
     _normalize_etag,
     get_hf_file_metadata,
@@ -1543,6 +1545,72 @@ class TestExtraLargeFileDownloadPaths:
                     revision="main",
                     etag_timeout=10,
                 )
+
+
+class TestDownloadToTmpAndMove:
+    """`_download_to_tmp_and_move` opens a name it derives itself, so it must convert that name."""
+
+    def _download(self, incomplete_path: Path, destination_path: Path) -> str:
+        """Run a download whose body is a no-op, and return the name of the file it opened."""
+        opened: list[str] = []
+
+        def fake_http_get(url, temp_file, **kwargs):
+            opened.append(temp_file.name)
+
+        with patch("huggingface_hub.file_download.http_get", fake_http_get):
+            _download_to_tmp_and_move(
+                incomplete_path=incomplete_path,
+                destination_path=destination_path,
+                url_to_download="https://hf.co/dummy",
+                headers={},
+                expected_size=None,
+                filename="model.safetensors",
+                force_download=False,
+                etag="a" * 40,
+                xet_file_data=None,
+            )
+        return opened[0]
+
+    def test_unique_name_is_converted_to_extended_path(self, tmp_path: Path):
+        """The unique '.<uuid>.incomplete' infix is added *after* callers convert `incomplete_path`.
+
+        Callers hand over a name they already passed through `as_extended_path`
+        (`LocalDownloadFilePaths.incomplete_path`, or the `blob_path` conversion in
+        `_hf_hub_download_to_cache_dir`), but the name opened here is 9 characters longer. A name
+        that fitted under the Windows limit can therefore cross it, so the final name has to be
+        converted too -- which is what this asserts, on every platform: the file opened is the
+        output of `as_extended_path`, not the raw `with_name()` result.
+        """
+        # Stand in for the real converter: the platform-independent part of its contract is that the
+        # caller opens whatever it returns. A real `\\?\` prefix is not openable off Windows.
+        with patch("huggingface_hub.file_download.as_extended_path", lambda p, **kw: f"{p}.converted"):
+            opened = self._download(tmp_path / "blob.incomplete", tmp_path / "blob")
+
+        assert opened.endswith(".converted")
+        # ...and it is the *final* name that was converted, infix included.
+        assert re.fullmatch(r".*blob\.[0-9a-f]{8}\.incomplete\.converted", opened), opened
+
+    @pytest.mark.skipif(os.name != "nt", reason="Windows-specific test.")
+    @pytest.mark.parametrize("incomplete_path_len", [246, 255])
+    def test_download_to_deep_path(self, tmp_path: Path, incomplete_path_len: int):
+        r"""A download whose temporary name crosses the Windows path limit must still run.
+
+        Without long path support enabled, Windows caps file paths at 255 characters. The two
+        parametrized lengths are the boundary this fix moves: at 255 the name passed in is itself at
+        the limit, and at 246 it is 9 below it -- the shortest length at which the added
+        '.<8 hex>.incomplete' infix still pushes the opened name past 255. Both were judged short
+        enough by the caller's conversion and then failed with WinError 206 on `open()`.
+        """
+        base = tmp_path / ("d" * max(1, incomplete_path_len - len(str(tmp_path / "blob.incomplete")) - 1))
+        os.makedirs("\\\\?\\" + os.path.abspath(base), exist_ok=True)
+        incomplete_path = base / "blob.incomplete"
+        assert len(str(incomplete_path)) == incomplete_path_len
+
+        opened = self._download(incomplete_path, base / "blob")
+
+        assert len(opened) > 255  # the name really is past the limit
+        assert opened.startswith("\\\\?\\")
+        assert (base / "blob").is_file()  # and the download completed into place
 
 
 def _recursive_chmod(path: str, mode: int) -> None:
