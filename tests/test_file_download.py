@@ -45,6 +45,7 @@ from huggingface_hub.file_download import (
 from huggingface_hub.utils import SoftTemporaryDirectory, WeakFileLock, get_session, hf_raise_for_status
 from huggingface_hub.utils._headers import build_hf_headers
 from huggingface_hub.utils._http import _http_backoff_base
+from huggingface_hub.utils._xet import XetFileData
 
 from .conftest import RepoFactory
 from .testing_constants import (
@@ -1550,7 +1551,7 @@ class TestExtraLargeFileDownloadPaths:
 class TestDownloadToTmpAndMove:
     """`_download_to_tmp_and_move` opens a name it derives itself, so it must convert that name."""
 
-    def _download(self, incomplete_path: Path, destination_path: Path) -> str:
+    def _download(self, incomplete_path: Path, destination_path: Path, force_download: bool = False) -> str:
         """Run a download whose body is a no-op, and return the name of the file it opened."""
         opened: list[str] = []
 
@@ -1565,7 +1566,7 @@ class TestDownloadToTmpAndMove:
                 headers={},
                 expected_size=None,
                 filename="model.safetensors",
-                force_download=False,
+                force_download=force_download,
                 etag="a" * 40,
                 xet_file_data=None,
             )
@@ -1618,6 +1619,84 @@ class TestDownloadToTmpAndMove:
         assert len(opened) > 255  # the name really is past the limit the caller checked against
         assert opened.startswith("\\\\?\\")
         assert (base / "blob").is_file()  # and the download completed into place
+
+    def test_xet_download_is_given_the_converted_name(self, tmp_path: Path):
+        """`xet_get` opens `tmp_path` itself, so the other download backend needs the conversion too.
+
+        `http_get` writes through the file object opened here, but the Xet path hands the *path* to
+        `xet_get`, which opens it again. Both backends therefore have to receive the converted name,
+        and only one of them is exercised by the test above.
+        """
+        received: list[Path] = []
+
+        def fake_xet_get(*, incomplete_path, **kwargs):
+            received.append(incomplete_path)
+
+        with (
+            patch("huggingface_hub.file_download.as_extended_path", lambda p, **kw: f"{p}.converted"),
+            patch("huggingface_hub.file_download.is_xet_available", lambda: True),
+            patch("huggingface_hub.file_download.xet_get", fake_xet_get),
+        ):
+            _download_to_tmp_and_move(
+                incomplete_path=tmp_path / "blob.incomplete",
+                destination_path=tmp_path / "blob",
+                url_to_download="https://hf.co/dummy",
+                headers={},
+                expected_size=None,
+                filename="model.safetensors",
+                force_download=False,
+                etag="a" * 40,
+                xet_file_data=XetFileData(file_hash="a" * 64, refresh_route="https://hf.co/refresh"),
+            )
+
+        assert str(received[0]).endswith(".converted"), received[0]
+        assert re.fullmatch(r".*blob\.[0-9a-f]{8}\.incomplete\.converted", str(received[0])), received[0]
+
+    def test_forced_redownload_is_given_the_converted_name(self, tmp_path: Path):
+        """`force_download=True` is the only way past the early return, so it reaches the fix too.
+
+        A download whose destination already exists returns at the top of the function without
+        building a temporary name at all; forcing it is what makes the changed line run for a file
+        that is already in the cache -- the case a user hits when re-pulling a corrupted blob.
+        """
+        destination_path = tmp_path / "blob"
+        destination_path.write_bytes(b"stale")
+
+        with patch("huggingface_hub.file_download.as_extended_path", lambda p, **kw: f"{p}.converted"):
+            opened = self._download(tmp_path / "blob.incomplete", destination_path, force_download=True)
+
+        assert opened.endswith(".converted"), opened
+        assert destination_path.read_bytes() == b""  # the forced download replaced the stale file
+
+    def test_failed_download_leaves_no_temporary_file_control(self, tmp_path: Path):
+        """(control) The `finally` clause cleans up whatever name was opened, converted or not.
+
+        Passes on both arms by design: it pins that `tmp_path` is a single value shared by the
+        `open()`, the cleanup and the move, so converting it cannot leave an orphan behind under the
+        unconverted name. A fix applied at the `open()` call instead of to `tmp_path` would fail it.
+        """
+
+        def exploding_http_get(url, temp_file, **kwargs):
+            raise RuntimeError("connection reset")
+
+        with (
+            patch("huggingface_hub.file_download.as_extended_path", lambda p, **kw: f"{p}.converted"),
+            patch("huggingface_hub.file_download.http_get", exploding_http_get),
+            pytest.raises(RuntimeError, match="connection reset"),
+        ):
+            _download_to_tmp_and_move(
+                incomplete_path=tmp_path / "blob.incomplete",
+                destination_path=tmp_path / "blob",
+                url_to_download="https://hf.co/dummy",
+                headers={},
+                expected_size=None,
+                filename="model.safetensors",
+                force_download=False,
+                etag="a" * 40,
+                xet_file_data=None,
+            )
+
+        assert list(tmp_path.iterdir()) == []
 
 
 def _recursive_chmod(path: str, mode: int) -> None:
