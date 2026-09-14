@@ -1,0 +1,65 @@
+name: Windows A/B (scratch)
+
+# Scratch-only: runs the TestDownloadToTmpAndMove cases on a real Windows host twice --
+# once with the fix and once with src/huggingface_hub/file_download.py reverted to the merge-base --
+# so the Windows-only cases have a fails-before arm. Never merged; lives on ci_* branches only.
+on:
+  push:
+    branches:
+      - ci_*
+
+jobs:
+  windows-ab:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      DISABLE_SYMLINKS_IN_WINDOWS_TESTS: 1
+      UV_HTTP_TIMEOUT: 600
+      BASE_SHA: bd9ece0951270a472dc3233a0861128e813b0d2d
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14"
+      - name: Setup venv + uv
+        run: |
+          pip install --upgrade uv
+          uv venv
+      - name: Install dependencies
+        run: |
+          uv pip install "huggingface_hub[testing] @ ."
+          uv pip uninstall hf_xet
+
+      - name: Preconditions -- long paths disabled, and which copy of the source is imported
+        working-directory: ./src
+        run: |
+          ..\.venv\Scripts\activate
+          python -c "import winreg; k=winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r'SYSTEM\CurrentControlSet\Control\FileSystem'); print('LongPathsEnabled =', winreg.QueryValueEx(k, 'LongPathsEnabled')[0])"
+          python -c "import huggingface_hub.file_download as m, inspect; print('imported from', m.__file__); print('fix present:', 'as_extended_path(incomplete_path.with_name' in inspect.getsource(m._download_to_tmp_and_move))"
+
+      - name: HEAD arm (with the fix)
+        working-directory: ./src
+        run: |
+          ..\.venv\Scripts\activate
+          python -m pytest ../tests/test_file_download.py -k "TestDownloadToTmpAndMove" -p no:cacheprovider -p no:randomly -v
+
+      - name: Revert the source fix to the merge-base
+        run: |
+          git checkout $env:BASE_SHA -- src/huggingface_hub/file_download.py
+          git --no-pager diff --stat HEAD
+
+      - name: BASE arm -- confirm the imported copy no longer carries the fix
+        working-directory: ./src
+        run: |
+          ..\.venv\Scripts\activate
+          python -c "import huggingface_hub.file_download as m, inspect; print('imported from', m.__file__); print('fix present:', 'as_extended_path(incomplete_path.with_name' in inspect.getsource(m._download_to_tmp_and_move))"
+
+      - name: BASE arm (fix reverted, same tests) -- expected to FAIL
+        working-directory: ./src
+        continue-on-error: true
+        run: |
+          ..\.venv\Scripts\activate
+          python -m pytest ../tests/test_file_download.py -k "TestDownloadToTmpAndMove" -p no:cacheprovider -p no:randomly -v
